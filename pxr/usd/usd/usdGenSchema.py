@@ -933,6 +933,8 @@ def GenerateCode(templatePath, codeGenPath, tokenData, classes, validate,
         tokensHTemplate = env.get_template('tokens.h')
         tokensCppTemplate = env.get_template('tokens.cpp')
         tokensWrapTemplate = env.get_template('wrapTokens.cpp')
+        moduleTemplate = env.get_template('module.cpp')
+        moduleDepsTemplate = env.get_template('moduleDeps.cpp')
     except TemplateNotFound as tnf:
         raise RuntimeError("Template not found: {0}".format(str(tnf)))
     except TemplateSyntaxError as tse:
@@ -944,7 +946,13 @@ def GenerateCode(templatePath, codeGenPath, tokenData, classes, validate,
         _WriteFile(os.path.join(codeGenPath, 'api.h'),
                    apiTemplate.render(),
                    validate)
-    
+    #Generate module.cpp moduleDeps.cpp and __init__.py files
+    Print('Writing python wrapper:')
+    _WriteFile(os.path.join(codeGenPath, 'module.cpp'),
+                   moduleTemplate.render(classes=classes), validate)
+    _WriteFile(os.path.join(codeGenPath, 'moduleDeps.cpp'),
+                   moduleDepsTemplate.render(), validate)
+
     if tokenData:
         Print('Writing Schema Tokens:')
         # tokens.h

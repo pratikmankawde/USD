@@ -161,6 +161,8 @@ pxr_library(usd
         codegenTemplates/tokens.h
         codegenTemplates/wrapSchemaClass.cpp
         codegenTemplates/wrapTokens.cpp
+		codegenTemplates/module.cpp
+		codegenTemplates/moduleDeps.cpp
 
     DOXYGEN_FILES
         doxygen/advancedFeatures.dox
