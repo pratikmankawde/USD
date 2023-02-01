@@ -23,12 +23,10 @@
 //
 #include <numeric> // for std::iota
 #include "hdPrman/mesh.h"
-#include "hdPrman/context.h"
+#include "hdPrman/renderParam.h"
 #include "hdPrman/coordSys.h"
 #include "hdPrman/instancer.h"
 #include "hdPrman/material.h"
-#include "hdPrman/renderParam.h"
-#include "hdPrman/renderPass.h"
 #include "hdPrman/rixStrings.h"
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/matrix4f.h"
@@ -51,9 +49,21 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-HdPrman_Mesh::HdPrman_Mesh(SdfPath const& id)
+TF_DEFINE_PRIVATE_TOKENS(
+    _tokens,
+    ((displacementBoundSphere, "displacementbound:sphere"))
+);
+
+HdPrman_Mesh::HdPrman_Mesh(SdfPath const& id, const bool isMeshLight)
     : BASE(id)
+    , _isMeshLight(isMeshLight)
 {
+}
+
+bool
+HdPrman_Mesh::_PrototypeOnly()
+{
+    return _isMeshLight;
 }
 
 HdDirtyBits
@@ -79,8 +89,29 @@ HdPrman_Mesh::GetInitialDirtyBitsMask() const
     return (HdDirtyBits)mask;
 }
 
+static
+VtIntArray
+_Union(const VtIntArray &a, const VtIntArray &b)
+{
+    if (a.empty()) {
+        return b;
+    } else if (b.empty()) {
+        return a;
+    } else {
+        VtIntArray aCopy = a;
+        VtIntArray bCopy = b;
+        std::sort(aCopy.begin(), aCopy.end());
+        std::sort(bCopy.begin(), bCopy.end());
+        VtIntArray merged;
+        std::set_union(aCopy.cbegin(), aCopy.cend(),
+                       bCopy.cbegin(), bCopy.cend(),
+                       std::back_inserter(merged));
+        return merged;
+    }
+}
+
 RtPrimVarList
-HdPrman_Mesh::_ConvertGeometry(HdPrman_Context *context,
+HdPrman_Mesh::_ConvertGeometry(HdPrman_RenderParam *renderParam,
                                 HdSceneDelegate *sceneDelegate,
                                 const SdfPath &id,
                                 RtUString *primType,
@@ -136,29 +167,7 @@ HdPrman_Mesh::_ConvertGeometry(HdPrman_Context *context,
     //
     // Point positions (P)
     //
-    HdTimeSampleArray<VtVec3fArray, HDPRMAN_MAX_TIME_SAMPLES> points;
-    {
-        HdTimeSampleArray<VtValue, HDPRMAN_MAX_TIME_SAMPLES> boxedPoints;
-        sceneDelegate->SamplePrimvar(id, HdTokens->points, &boxedPoints);
-        points.UnboxFrom(boxedPoints);
-    }
-
-    primvars.SetTimes(points.count, &points.times[0]);
-    for (size_t i=0; i < points.count; ++i) {
-        if (points.values[i].size() == npoints) {
-            primvars.SetPointDetail(
-                RixStr.k_P, 
-                (RtPoint3*) points.values[i].cdata(),
-                RtDetailType::k_vertex, 
-                i);
-        } else {
-            TF_WARN("<%s> primvar 'points' size (%zu) did not match "
-                    "expected (%zu)", 
-                    id.GetText(), 
-                    points.values[i].size(), 
-                    npoints);
-        }
-    }
+    HdPrman_ConvertPointsPrimvar(sceneDelegate, id, primvars, npoints);
 
     // Topology.
     primvars.SetIntegerDetail(RixStr.k_Ri_nvertices, nverts.cdata(),
@@ -178,7 +187,13 @@ HdPrman_Mesh::_ConvertGeometry(HdPrman_Context *context,
         *primType = RixStr.k_Ri_PolygonMesh;
     }
 
-    VtIntArray holeIndices = topology.GetHoleIndices();
+    // Invisible faces will be handled by treating them as holes.  Since there
+    // may also be explicitly specified hole indices, we use the union of the
+    // two lists as the hole indices for the mesh.
+    const VtIntArray invisibleFaces = topology.GetInvisibleFaces();
+    const VtIntArray explicitHoleIndices = topology.GetHoleIndices();
+    const VtIntArray holeIndices = _Union(invisibleFaces, explicitHoleIndices);
+
     if (*primType == RixStr.k_Ri_PolygonMesh &&
         !holeIndices.empty()) {
         // Poly meshes with holes are promoted to bilinear subdivs, to
@@ -186,10 +201,7 @@ HdPrman_Mesh::_ConvertGeometry(HdPrman_Context *context,
         *primType = RixStr.k_Ri_SubdivisionMesh;
         primvars.SetString(RixStr.k_Ri_scheme, RixStr.k_bilinear);
     }
-
-    if (IsDoubleSided(sceneDelegate)) {
-        primvars.SetInteger(RixStr.k_Ri_Sides, 2);
-    }
+  
     // Orientation, aka winding order.
     // Because PRMan uses a left-handed coordinate system, and USD/Hydra
     // use a right-handed coordinate system, the meaning of orientation
@@ -225,10 +237,18 @@ HdPrman_Mesh::_ConvertGeometry(HdPrman_Context *context,
         VtIntArray creaseIndices = osdTags.GetCreaseIndices();
         VtFloatArray creaseWeights = osdTags.GetCreaseWeights();
         if (!creaseIndices.empty()) {
+            const bool weightPerCrease = 
+                creaseWeights.size() == creaseLengths.size();
             for (int creaseLength: creaseLengths) {
                 tagNames.push_back(RixStr.k_crease);
                 tagArgCounts.push_back(creaseLength); // num int args
-                tagArgCounts.push_back(1); // num float args
+                if (weightPerCrease) {
+                    // one weight for each crease
+                    tagArgCounts.push_back(1); // num float args
+                } else {
+                    // one weight for each crease edge
+                    tagArgCounts.push_back(creaseLength-1); // num float args
+                }
                 tagArgCounts.push_back(0); // num str args
             }
             tagIntArgs.insert(tagIntArgs.end(),

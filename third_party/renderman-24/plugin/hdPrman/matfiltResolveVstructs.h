@@ -25,23 +25,19 @@
 #define EXT_RMANPKG_24_0_PLUGIN_RENDERMAN_PLUGIN_HD_PRMAN_MATFILT_RESOLVE_VSTRUCTS_H
 
 #include "pxr/pxr.h"
-#include "hdPrman/matfiltFilterChain.h"
+#include "pxr/imaging/hd/material.h"
+#include "pxr/imaging/hd/materialNetworkInterface.h"
+#include "pxr/usd/ndr/declare.h"
+
 #include <memory>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-/// MatfiltFilterChain::FilterFnc implementation which expands "virtual struct"
-/// connections -- including evaluation of conditional actions.
-///
-/// Observes an optional boolean value for field "enableVstructConditions"
-/// within \p contextValues. This defaults to true.
-///
+/// Expands "virtual struct" connections for RenderMan.
+/// If requested, conditional actions are evaluated.
 void MatfiltResolveVstructs(
-        const SdfPath & networkId,
-        HdMaterialNetwork2 & network,
-        const std::map<TfToken, VtValue> & contextValues,
-        const NdrTokenVec & shaderTypePriority,
-        std::vector<std::string> * outputErrorMessages);
+        HdMaterialNetworkInterface *networkInterface,
+        bool enableConditions = true);
 
 class MatfiltVstructConditionalEvaluatorImpl;
 
@@ -57,7 +53,7 @@ public:
 
     ~MatfiltVstructConditionalEvaluator();
 
-    static Ptr Parse(const std::string & inputExpr);
+    static Ptr Parse(const std::string &inputExpr);
 
     /// Runs the conditional actions specified by the parsed inputExpr.
     /// 
@@ -67,16 +63,16 @@ public:
     /// directly change.
     /// 
     void Evaluate(
-            const SdfPath & nodeId,
-            const TfToken & nodeInputId,
-            const SdfPath & upstreamNodeId,
-            const TfToken & upstreamNodeOutput,
-            const NdrTokenVec & shaderTypePriority,
-            HdMaterialNetwork2 & network) const;
+            const TfToken &nodeId,
+            const TfToken &nodeInputId,
+            const TfToken &upstreamNodeId,
+            const TfToken &upstreamNodeOutput,
+            const NdrTokenVec &shaderTypePriority,
+            HdMaterialNetworkInterface *networkInterface) const;
 private:
     MatfiltVstructConditionalEvaluator() = default;
 
-    MatfiltVstructConditionalEvaluatorImpl * _impl = nullptr;
+    MatfiltVstructConditionalEvaluatorImpl *_impl = nullptr;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

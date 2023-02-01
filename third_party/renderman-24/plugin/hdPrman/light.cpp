@@ -23,11 +23,13 @@
 //
 #include "hdPrman/light.h"
 #include "hdPrman/material.h"
-#include "hdPrman/context.h"
-#include "hdPrman/debugCodes.h"
+#include "hdPrman/mesh.h"
 #include "hdPrman/renderParam.h"
+#include "hdPrman/debugCodes.h"
 #include "hdPrman/rixStrings.h"
+#include "pxr/base/arch/library.h"
 #include "pxr/base/gf/vec3f.h"
+#include "pxr/usd/ar/resolver.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/base/tf/debug.h"
 #include "pxr/base/tf/envSetting.h"
@@ -59,9 +61,11 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((lightGroup,                   "inputs:ri:light:lightGroup"))
     ((colorMapGamma,                "inputs:ri:light:colorMapGamma"))
     ((colorMapSaturation,           "inputs:ri:light:colorMapSaturation"))
+
+    ((meshLightSourceMesh,          "sourceMesh"))
 );
 
-TF_DEFINE_ENV_SETTING(HD_PRMAN_ENABLE_LIGHT_MATERIAL_NETWORKS, false,
+TF_DEFINE_ENV_SETTING(HD_PRMAN_ENABLE_LIGHT_MATERIAL_NETWORKS, true,
                       "bool env setting to enable material networks for lights "
                       "and light filters");
 
@@ -74,35 +78,34 @@ HdPrmanLight::HdPrmanLight(SdfPath const& id, TfToken const& lightType)
     /* NOTHING */
 }
 
-HdPrmanLight::~HdPrmanLight()
-{
-}
+HdPrmanLight::~HdPrmanLight() = default;
 
 void
 HdPrmanLight::Finalize(HdRenderParam *renderParam)
 {
-    HdPrman_Context *context =
-        static_cast<HdPrman_RenderParam*>(renderParam)->AcquireContext();
-    _ResetLight(context);
+    HdPrman_RenderParam *param =
+        static_cast<HdPrman_RenderParam*>(renderParam);
+    _ResetLight(param, true);
 }
 
 void
-HdPrmanLight::_ResetLight(HdPrman_Context *context)
+HdPrmanLight::_ResetLight(HdPrman_RenderParam *renderParam, bool clearFilterPaths)
 {
+    riley::Riley *riley = renderParam->AcquireRiley();
+
     if (!_lightLink.IsEmpty()) {
-        context->DecrementLightLinkCount(_lightLink);
+        renderParam->DecrementLightLinkCount(_lightLink);
         _lightLink = TfToken();
     }
-    if (!_lightFilterPaths.empty()) {
+    if (clearFilterPaths && !_lightFilterPaths.empty()) {
         _lightFilterPaths.clear();
     }
     if (!_lightFilterLinks.empty()) {
         for (const TfToken &filterLink: _lightFilterLinks)
-            context->DecrementLightFilterCount(filterLink);
+            renderParam->DecrementLightFilterCount(filterLink);
         _lightFilterLinks.clear();
     }
 
-    riley::Riley *riley = context->riley;
     if (_instanceId != riley::LightInstanceId::InvalidId()) {
         riley->DeleteLightInstance(
             riley::GeometryPrototypeId::InvalidId(),
@@ -125,6 +128,29 @@ _RtStringFromSdfAssetPath(SdfAssetPath const& ap)
     if (p.empty()) {
         p = ap.GetAssetPath();
     }
+    return RtUString(p.c_str());
+}
+
+static RtUString
+_RtStringFromLightColorMapAssetPath(SdfAssetPath const& ap)
+{
+    // Although Renderman does its own searchpath resolution,
+    // scene delegates like USD may have additional path resolver
+    // semantics, so try GetResolvedPath() first.
+    //
+    // Also, use the RtxHioImage plugin if the path is resolved and it
+    // isn't a tex file.  RtxHioImage wants to flip images by default
+    // but lightColorMap images should not be flipped.
+    std::string p = ap.GetResolvedPath();
+    if (p.empty()) {
+        p = ap.GetAssetPath();
+    }
+    else if (ArGetResolver().GetExtension(p) != "tex") {
+        p = "rtxplugin:RtxHioImage" ARCH_LIBRARY_SUFFIX
+            "?filename=" + p + "&flipped=false";
+    }
+    TF_DEBUG(HDPRMAN_IMAGE_ASSET_RESOLVE)
+        .Msg("Resolved lightColorMap asset path: %s\n", p.c_str());
     return RtUString(p.c_str());
 }
 
@@ -162,6 +188,7 @@ _PopulateNodeFromLightParams(HdSceneDelegate *sceneDelegate,
     static const RtUString us_PxrCylinderLight("PxrCylinderLight");
     static const RtUString us_PxrSphereLight("PxrSphereLight");
     static const RtUString us_PxrDistantLight("PxrDistantLight");
+    static const RtUString us_PxrMeshLight("PxrMeshLight");
     static const RtUString us_angleExtent("angleExtent");
     static const RtUString us_lightColorMap("lightColorMap");
     static const RtUString us_default("default");
@@ -178,6 +205,7 @@ _PopulateNodeFromLightParams(HdSceneDelegate *sceneDelegate,
     static const RtUString us_lightGroup("lightGroup");
     static const RtUString us_colorMapGamma("colorMapGamma");
     static const RtUString us_colorMapSaturation("colorMapSaturation");
+    static const RtUString us_textureColor("textureColor");    
 
     lightNodes->push_back({
         riley::ShadingNode::Type::k_Light, // type
@@ -458,6 +486,8 @@ _PopulateNodeFromLightParams(HdSceneDelegate *sceneDelegate,
         lightNode.name = us_PxrCylinderLight;
     } else if (hdLightType == HdPrimTypeTokens->sphereLight) {
         lightNode.name = us_PxrSphereLight;
+    } else if (hdLightType == HdPrimTypeTokens->meshLight) {
+        lightNode.name = us_PxrMeshLight;
     } else if (hdLightType == HdPrimTypeTokens->distantLight) {
         lightNode.name = us_PxrDistantLight;
         VtValue angle =
@@ -474,7 +504,8 @@ _PopulateNodeFromLightParams(HdSceneDelegate *sceneDelegate,
             HdLightTokens->textureFile);
         if (textureFile.IsHolding<SdfAssetPath>()) {
             SdfAssetPath ap = textureFile.UncheckedGet<SdfAssetPath>();
-            lightNode.params.SetString(us_lightColorMap, _RtStringFromSdfAssetPath(ap));
+            lightNode.params.SetString(us_lightColorMap,
+                        _RtStringFromLightColorMapAssetPath(ap));
         }
 
         VtValue colorMapGamma =
@@ -506,9 +537,8 @@ _PopulateNodesFromMaterialResource(HdSceneDelegate *sceneDelegate,
     }
 
     // Convert HdMaterial to HdMaterialNetwork2 form.
-    HdMaterialNetwork2 matNetwork2;
-    HdMaterialNetwork2ConvertFromHdMaterialNetworkMap(
-        hdMatVal.UncheckedGet<HdMaterialNetworkMap>(), &matNetwork2);
+    const HdMaterialNetwork2 matNetwork2 = HdConvertToHdMaterialNetwork2(
+            hdMatVal.UncheckedGet<HdMaterialNetworkMap>());
 
     SdfPath nodePath;
     for (auto const& terminal: matNetwork2.terminals) {
@@ -535,31 +565,244 @@ _PopulateNodesFromMaterialResource(HdSceneDelegate *sceneDelegate,
     return true;
 }
 
+static void
+_AddLightFilterCombiner(std::vector<riley::ShadingNode>* lightFilterNodes)
+{
+    static RtUString combineMode("combineMode");
+    static RtUString mult("mult");
+    static RtUString max("max");
+    static RtUString min("min");
+    static RtUString screen("screen");
+
+    riley::ShadingNode combiner = riley::ShadingNode {
+        riley::ShadingNode::Type::k_LightFilter,
+        RtUString("PxrCombinerLightFilter"),
+        RtUString("terminal.Lightfilter"),
+        RtParamList()
+    };
+
+    // Build a map of light filter handles grouped by mode.
+    std::unordered_map<RtUString, std::vector<RtUString>> modeMap;
+
+    for (const auto& lightFilterNode : *lightFilterNodes) {       
+        RtUString mode;
+        lightFilterNode.params.GetString(combineMode, mode);
+        if (mode.Empty()) {
+            modeMap[mult].push_back(lightFilterNode.handle);
+        } 
+        else {
+            modeMap[mode].push_back(lightFilterNode.handle);
+        }
+    }
+
+    // Set the combiner light filter reference array for each mode.
+    for (const auto& entry : modeMap) {
+        combiner.params.SetLightFilterReferenceArray(
+            entry.first, &entry.second[0], entry.second.size());
+    }
+
+    lightFilterNodes->push_back(combiner);
+}
+
+static void
+_PopulateLightFilterNodes(
+        const SdfPath &lightId,
+        const SdfPathVector &lightFilterPaths,
+        HdSceneDelegate *sceneDelegate,
+        HdRenderParam *renderParam,
+        riley::Riley *riley,
+        std::vector<riley::ShadingNode> *lightFilterNodes,
+        std::vector<riley::CoordinateSystemId> *coordsysIds,
+        std::vector<TfToken> *lightFilterLinks)
+{
+    HdPrman_RenderParam * const param =
+        static_cast<HdPrman_RenderParam*>(renderParam);
+
+    if (lightFilterPaths.empty()) {
+        return;
+    }
+
+    int maxFilters = lightFilterPaths.size();
+    if (maxFilters > 1) {
+        maxFilters += 1;  // extra for the combiner filter
+    }
+    lightFilterNodes->reserve(maxFilters);
+    
+    for (const auto& filterPath : lightFilterPaths) {
+        TF_DEBUG(HDPRMAN_LIGHT_FILTER_LINKING)
+            .Msg("HdPrman: Light <%s> filter \"%s\" path \"%s\"\n",
+                lightId.GetText(), filterPath.GetName().c_str(),
+                filterPath.GetText());
+
+        if (!sceneDelegate->GetVisible(filterPath)) {
+            // XXX -- need to get a dependency analysis working here
+            // Invis of a filter works but does not cause the light
+            // to re-sync so one has to tweak the light to see the
+            // effect of the invised filter
+            TF_DEBUG(HDPRMAN_LIGHT_FILTER_LINKING)
+                .Msg("  filter invisible\n");
+            continue;
+        }
+
+        if (TfGetEnvSetting(HD_PRMAN_ENABLE_LIGHT_MATERIAL_NETWORKS)) {
+            if (!_PopulateNodesFromMaterialResource(
+                    sceneDelegate, filterPath,
+                    HdMaterialTerminalTokens->lightFilter, 
+                    lightFilterNodes)) {
+                continue;
+            }
+        } else {
+            if (!HdPrmanLightFilterPopulateNodesFromLightParams(
+                lightFilterNodes, filterPath, sceneDelegate)) {
+                continue;
+            }
+        }
+
+        HdPrmanLightFilterGenerateCoordSysAndLinks(
+            &lightFilterNodes->back(),
+            filterPath,
+            coordsysIds,
+            lightFilterLinks,
+            sceneDelegate,
+            param,
+            riley);
+    }
+
+    // Multiple filters requires a PxrCombinerLightFilter to combine results.
+    if (lightFilterNodes->size() > 1) {
+        _AddLightFilterCombiner(lightFilterNodes);
+    }
+}
+
 /* virtual */
 void
 HdPrmanLight::Sync(HdSceneDelegate *sceneDelegate,
                    HdRenderParam   *renderParam,
                    HdDirtyBits     *dirtyBits)
 {
+    // Change tracking
+    HdDirtyBits bits = *dirtyBits;
+
     static const RtUString us_PxrDomeLight("PxrDomeLight");
     static const RtUString us_PxrRectLight("PxrRectLight");
     static const RtUString us_PxrDiskLight("PxrDiskLight");
     static const RtUString us_PxrCylinderLight("PxrCylinderLight");
     static const RtUString us_PxrSphereLight("PxrSphereLight");
     static const RtUString us_PxrDistantLight("PxrDistantLight");
+    static const RtUString us_PxrMeshLight("PxrMeshLight");
     static const RtUString us_shadowSubset("shadowSubset");
     static const RtUString us_default("default");
 
-    HdPrman_Context *context =
-        static_cast<HdPrman_RenderParam*>(renderParam)->AcquireContext();
 
     SdfPath id = GetId();
 
-    riley::Riley *riley = context->riley;
+    // Set default riley args.
+    riley::GeometryPrototypeId geometryPrototypeId = 
+        riley::GeometryPrototypeId::InvalidId();
+    riley::MaterialId instanceMaterialId = 
+        riley::MaterialId::InvalidId();
 
+    HdPrman_RenderParam * const param =
+            static_cast<HdPrman_RenderParam*>(renderParam);
+
+    // Early mesh light tests. See if the geometry prototype exists (yet).
+    // Sprims get created before rprims, but for mesh lights we *need* the
+    // source mesh rprim, since that's our geometry prototype. If it hasn't
+    // yet been created, we return early. In that case, the light is still 
+    // marked as "dirty", so this will run again.
+    const VtValue sourceMesh = sceneDelegate->GetLightParamValue(id, 
+            _tokens->meshLightSourceMesh);
+
+    if (sourceMesh.IsHolding<SdfPath>()) {
+
+        const SdfPath sourceMeshPath = sourceMesh.UncheckedGet<SdfPath>();
+        const HdRprim *rprim = 
+                sceneDelegate->GetRenderIndex().GetRprim(sourceMeshPath);
+
+        if (!rprim) {
+            // No prim. It may not have been created yet. Leave the light 
+            // "dirty" and return.
+            return;            
+        }
+
+        auto mesh = static_cast<const HdPrman_Mesh*>(rprim);
+        std::vector<riley::GeometryPrototypeId> prototypeIds = 
+                mesh->GetPrototypeIds();
+
+        if (prototypeIds.empty()) {
+            TF_WARN("Could not find prototype for mesh at '%s'."
+                    " Skipping '%s'.", 
+                    sourceMeshPath.GetText(), 
+                    id.GetText());
+            // Light stays dirty.
+            return;
+        }
+
+        // Find geometry prototype id.
+        for (const auto &protoTypeId: prototypeIds) {
+            if (protoTypeId != riley::GeometryPrototypeId::InvalidId()) {
+                geometryPrototypeId = protoTypeId;
+                break;
+            }
+        }
+
+        // Find instance material id.
+        const SdfPath materialPath = sceneDelegate->GetMaterialId(
+                sourceMeshPath);
+        if (materialPath == SdfPath()) {
+            // Leave the light "dirty" and return.
+            return;
+        } 
+        const HdSprim *sprim = 
+                sceneDelegate->GetRenderIndex().GetSprim(
+                        HdSprimTypeTokens->material,
+                        materialPath);
+        if (!sprim) {
+            // No prim. It may not have been created yet. Leave the light 
+            // "dirty" and return.            
+            return;
+        }
+        auto hdPrmanMaterial = static_cast<const HdPrmanMaterial*>(sprim);
+        instanceMaterialId = hdPrmanMaterial->GetMaterialId();
+
+        if (instanceMaterialId == riley::MaterialId::InvalidId()) {
+            TF_WARN("Could not find material for mesh at '%s'."
+                    " Skipping '%s'.", 
+                    sourceMeshPath.GetText(), 
+                    id.GetText());
+            // Stay dirty. Return.
+            return;
+        }
+
+        // Note: If we've returned early, we'll need to revisit this light 
+        // once the other prims have been processed. This will continue 
+        // until we succeed (and "bits" is marked "clean", which happens 
+        // below). In the meshlight case, we're synthesizing the 
+        // dependencies, so we know we'll succeed quickly. However, misuse 
+        // of this code might result in a loop.
+
+        // TODO: Dependency tracking here?
+    }
+
+    riley::Riley *const riley = param->AcquireRiley();
+
+    HdChangeTracker& changeTracker = 
+        sceneDelegate->GetRenderIndex().GetChangeTracker();
+
+    // Remove old dependencies before clearing the light.
+    bool clearFilterPaths = false;
+    if (bits & DirtyParams) {
+        if (!_lightFilterPaths.empty()) {
+            for (SdfPath const & filterPath : _lightFilterPaths) {
+                changeTracker.RemoveSprimSprimDependency(filterPath, id);
+            }
+        }
+        clearFilterPaths = true;
+    }
+    
     // For simplicity just re-create the light.  In the future we may
     // want to consider adding a path to use the Modify() API in Riley.
-    _ResetLight(context);
+    _ResetLight(param, clearFilterPaths);
 
     std::vector<riley::ShadingNode> lightNodes;
 
@@ -571,7 +814,7 @@ HdPrmanLight::Sync(HdSceneDelegate *sceneDelegate,
             sceneDelegate, id, _hdLightType, &lightNodes);
     }
 
-    if (lightNodes.empty()) {
+    if (lightNodes.empty() || lightNodes.back().name.Empty()) {
         TF_WARN("Could not populate shading nodes for light '%s'. Skipping.",
                 id.GetText());
         *dirtyBits = HdChangeTracker::Clean;
@@ -587,7 +830,18 @@ HdPrmanLight::Sync(HdSceneDelegate *sceneDelegate,
     riley::ShadingNode &lightNode = lightNodes.back();
 
     // Attributes.
-    RtParamList attrs = context->ConvertAttributes(sceneDelegate, id);
+    RtParamList attrs = param->ConvertAttributes(sceneDelegate, id, false);
+
+    // Check if the dome light should be camera visible
+    if (lightNode.name == us_PxrDomeLight) {
+        const bool domeLightCamVis = sceneDelegate->GetRenderIndex().
+            GetRenderDelegate()->GetRenderSetting<bool>(
+                HdRenderSettingsTokens->domeLightCameraVisibility,
+                true);
+        if (!domeLightCamVis) {
+            attrs.SetInteger(RixStr.k_visibility_camera, 0);
+        }
+    }
 
     // Light linking
     {
@@ -596,9 +850,9 @@ HdPrmanLight::Sync(HdSceneDelegate *sceneDelegate,
         if (val.IsHolding<TfToken>()) {
             _lightLink = val.UncheckedGet<TfToken>();
         }
-        
+
         if (!_lightLink.IsEmpty()) {
-            context->IncrementLightLinkCount(_lightLink);
+            param->IncrementLightLinkCount(_lightLink);
             // For lights to link geometry, the lights must
             // be assigned a grouping membership, and the
             // geometry must subscribe to that grouping.
@@ -606,7 +860,7 @@ HdPrmanLight::Sync(HdSceneDelegate *sceneDelegate,
                             RtUString(_lightLink.GetText()));
             TF_DEBUG(HDPRMAN_LIGHT_LINKING)
                 .Msg("HdPrman: Light <%s> grouping membership \"%s\"\n",
-                        id.GetText(), _lightLink.GetText());
+                     id.GetText(), _lightLink.GetText());
         } else {
             // Default light group
             attrs.SetString(RixStr.k_grouping_membership, us_default);
@@ -633,78 +887,28 @@ HdPrmanLight::Sync(HdSceneDelegate *sceneDelegate,
     }
 
     // filters
-    std::vector<riley::ShadingNode> filterNodes;
-    std::vector<riley::CoordinateSystemId> coordsysIds;
-    {
-        VtValue val =
-            sceneDelegate->GetLightParamValue(id, HdTokens->filters);
+    // Re-gather filter paths and add dependencies if necessary.
+    if (clearFilterPaths) {
+        VtValue val = sceneDelegate->GetLightParamValue(id, HdTokens->filters);
         if (val.IsHolding<SdfPathVector>()) {
             _lightFilterPaths = val.UncheckedGet<SdfPathVector>();
-            if (!_lightFilterPaths.empty()) {
-                int maxFilters = _lightFilterPaths.size();
-                std::vector<RtUString> sa;
-                if (maxFilters > 1)
-                    sa.reserve(maxFilters);
-                    maxFilters += 1;  // extra for the combiner filter
-                filterNodes.reserve(maxFilters);
-
-                for (SdfPath &filterPath: _lightFilterPaths) {
-                    TF_DEBUG(HDPRMAN_LIGHT_FILTER_LINKING)
-                        .Msg("HdPrman: Light <%s> filter \"%s\" path \"%s\"\n",
-                             id.GetText(), filterPath.GetName().c_str(),
-                             filterPath.GetText());
-
-                    if (!sceneDelegate->GetVisible(filterPath)) {
-                        // XXX -- need to get a dependency analysis working here
-                        // Invis of a filter works but does not cause the light
-                        // to re-sync so one has to tweak the light to see the
-                        // effect of the invised filter
-                        TF_DEBUG(HDPRMAN_LIGHT_FILTER_LINKING)
-                            .Msg("  filter invisible\n");
-                        continue;
-                    }
-
-                    if (TfGetEnvSetting(HD_PRMAN_ENABLE_LIGHT_MATERIAL_NETWORKS)) {
-                        if (!_PopulateNodesFromMaterialResource(
-                                sceneDelegate, filterPath,
-                                HdMaterialTerminalTokens->lightFilter, 
-                                &filterNodes)) {
-                            continue;
-                        }
-                    } else {
-                        if (!HdPrmanLightFilterPopulateNodesFromLightParams(
-                            &filterNodes, filterPath, sceneDelegate)) {
-                            continue;
-                        }
-                    }
-
-                    HdPrmanLightFilterGenerateCoordSysAndLinks(
-                        &filterNodes.back(), filterPath, &coordsysIds,
-                        &_lightFilterLinks, sceneDelegate, context, riley, 
-                        lightNode);
-                    sa.push_back(filterNodes.back().handle);
-                }
-                if (sa.size() > 1) {
-                    // More than 1 light filter requires a combiner to blend
-                    // their results
-                    filterNodes.push_back({
-                        riley::ShadingNode::Type::k_LightFilter,
-                        RtUString("PxrCombinerLightFilter"),
-                        RtUString("terminal.Lightfilter"),
-                        RtParamList()});
-                    // XXX -- assume mult for now
-                    filterNodes.back().params.SetLightFilterReferenceArray(
-                        RtUString("mult"),
-                        (const RtUString* const&)&sa[0], sa.size());
-                }
+            for (SdfPath &filterPath: _lightFilterPaths) {
+                changeTracker.AddSprimSprimDependency(filterPath, id);
             }
         }
     }
 
+    std::vector<riley::ShadingNode> filterNodes;
+    std::vector<riley::CoordinateSystemId> coordsysIds;
+    _PopulateLightFilterNodes(
+        id, _lightFilterPaths, sceneDelegate, renderParam, riley,
+        &filterNodes, &coordsysIds, &_lightFilterLinks);
+
     // TODO: portals
 
+    // Create the light shader.
     _shaderId = riley->CreateLightShader(
-        riley::UserId::DefaultId(),
+        riley::UserId(stats::AddDataLocation(id.GetText()).GetValue()),
         {static_cast<uint32_t>(lightNodes.size()), lightNodes.data()},
         {static_cast<uint32_t>(filterNodes.size()), filterNodes.data()});
 
@@ -763,6 +967,14 @@ HdPrmanLight::Sync(HdSceneDelegate *sceneDelegate,
         if (radius.IsHolding<float>()) {
             geomScale *= radius.UncheckedGet<float>() / 0.5;
         }
+    } else if (lightNode.name == us_PxrMeshLight) {
+        // Our mesh light geom should not be visible, and should be one-sided, 
+        // to match the existing Katana behavior.
+        attrs.SetInteger(RixStr.k_visibility_camera, 0);
+        attrs.SetInteger(RixStr.k_visibility_transmission, 0);
+        attrs.SetInteger(RixStr.k_visibility_indirect, 0);
+        // Note: In Xpu, this may be "sides", not "Sides".
+        attrs.SetInteger(RixStr.k_Sides, 1);
     }
 
     geomMat.SetScale(geomScale);
@@ -804,23 +1016,25 @@ HdPrmanLight::Sync(HdSceneDelegate *sceneDelegate,
     riley::CoordinateSystemList const coordsysList = {
                              unsigned(coordsysIds.size()), coordsysIds.data()};
     _instanceId = riley->CreateLightInstance(
-        riley::UserId::DefaultId(),
+        riley::UserId(stats::AddDataLocation(id.GetText()).GetValue()),
         riley::GeometryPrototypeId::InvalidId(), // no group
-        riley::GeometryPrototypeId::InvalidId(), // no geo
-        riley::MaterialId::InvalidId(), // no material
+        geometryPrototypeId, // No geo id, unless this is a mesh light.
+        instanceMaterialId, // No material id, unless this is a mesh light.
         _shaderId,
         coordsysList,
         xform,
         attrs);
 
-    *dirtyBits = HdChangeTracker::Clean;
+    if (dirtyBits) {
+        *dirtyBits = HdChangeTracker::Clean;
+    }
 }
 
 /* virtual */
 HdDirtyBits
 HdPrmanLight::GetInitialDirtyBitsMask() const
 {
-    return HdChangeTracker::AllDirty;
+    return HdLight::AllDirty;
 }
 
 bool

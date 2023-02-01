@@ -25,19 +25,18 @@
 #define EXT_RMANPKG_24_0_PLUGIN_RENDERMAN_PLUGIN_HD_PRMAN_MATFILT_CONVERT_PREVIEW_MATERIAL_H
 
 #include "pxr/pxr.h"
-#include "hdPrman/matfiltFilterChain.h"
+#include "pxr/imaging/hd/material.h"
+#include "pxr/imaging/hd/materialNetworkInterface.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-/// MatfiltFilterChain::FilterFnc implementation which converts
-/// USD preview shading nodes to Renderman equivalents.
+class HdMaterialNetworkInterface;
+
+/// Converts USD preview shading nodes to Renderman equivalents.
 void
 MatfiltConvertPreviewMaterial(
-    const SdfPath & networkId,
-    HdMaterialNetwork2 & network,
-    const std::map<TfToken, VtValue> & contextValues,
-    const NdrTokenVec & shaderTypePriority,
-    std::vector<std::string> * outputErrorMessages);
+    HdMaterialNetworkInterface *networkInterface,
+    std::vector<std::string> *outputErrorMessages);
 
 PXR_NAMESPACE_CLOSE_SCOPE
 

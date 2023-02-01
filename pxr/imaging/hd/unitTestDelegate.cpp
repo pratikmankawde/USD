@@ -28,6 +28,7 @@
 #include "pxr/imaging/hd/mesh.h"
 #include "pxr/imaging/hd/meshTopology.h"
 #include "pxr/imaging/hd/points.h"
+#include "pxr/imaging/hd/renderBuffer.h"
 #include "pxr/imaging/hd/renderDelegate.h"
 
 #include "pxr/base/tf/staticTokens.h"
@@ -235,9 +236,26 @@ HdUnitTestDelegate::AddMesh(SdfPath const &id,
 }
 
 void
+HdUnitTestDelegate::SetMeshCullStyle(
+    SdfPath const &id, HdCullStyle const &cullStyle)
+{
+    auto it = _meshes.find(id);
+    if (it != _meshes.end()) {
+        if (it->second.cullStyle != cullStyle) {
+            it->second.cullStyle = cullStyle;
+            HdChangeTracker& tracker = GetRenderIndex().GetChangeTracker();
+            tracker.MarkRprimDirty(id, HdChangeTracker::DirtyCullStyle);
+        }
+    } else {
+        TF_WARN("Could not find mesh Rprim named %s. \n", id.GetText());
+    }
+}
+
+void
 HdUnitTestDelegate::AddBasisCurves(SdfPath const &id,
                                     VtVec3fArray const &points,
                                     VtIntArray const &curveVertexCounts,
+                                    VtIntArray const &curveIndices,
                                     VtVec3fArray const &normals,
                                     TfToken const &type,
                                     TfToken const &basis,
@@ -254,7 +272,7 @@ HdUnitTestDelegate::AddBasisCurves(SdfPath const &id,
     HdRenderIndex& index = GetRenderIndex();
     index.InsertRprim(HdPrimTypeTokens->basisCurves, this, id);
 
-    _curves[id] = _Curves(points, curveVertexCounts, 
+    _curves[id] = _Curves(points, curveVertexCounts, curveIndices,
                           type,
                           basis);
 
@@ -454,6 +472,11 @@ HdUnitTestDelegate::UpdateTransform(SdfPath const& id,
         HdChangeTracker& tracker = GetRenderIndex().GetChangeTracker();
         tracker.MarkRprimDirty(id, HdChangeTracker::DirtyTransform);
     }
+    if (_cameras.find(id) != _cameras.end()) {
+        _cameras[id].transform = mat;
+        HdChangeTracker& tracker = GetRenderIndex().GetChangeTracker();
+        tracker.MarkSprimDirty(id, HdChangeTracker::DirtyTransform);
+    }        
 }
 
 void 
@@ -638,11 +661,22 @@ HdUnitTestDelegate::UpdateInstancerPrototypes(float time)
 
 void
 HdUnitTestDelegate::AddRenderBuffer(SdfPath const &id,
-    GfVec3i const& dims, HdFormat format, bool multiSampled)
+                                    HdRenderBufferDescriptor const &desc)
 {
     HdRenderIndex& index = GetRenderIndex();
     index.InsertBprim(HdPrimTypeTokens->renderBuffer, this, id);
-    _renderBuffers[id] = _RenderBuffer(dims, format, multiSampled);
+    _renderBuffers[id] = _RenderBuffer(
+        desc.dimensions, desc.format, desc.multiSampled);
+}
+
+void
+HdUnitTestDelegate::UpdateRenderBuffer(SdfPath const &id, 
+                                       HdRenderBufferDescriptor const &desc)
+{
+    _renderBuffers[id] = _RenderBuffer(
+        desc.dimensions, desc.format, desc.multiSampled);
+    HdChangeTracker& tracker = GetRenderIndex().GetChangeTracker();
+    tracker.MarkBprimDirty(id, HdRenderBuffer::DirtyDescription);
 }
 
 void
@@ -676,6 +710,8 @@ HdUnitTestDelegate::UpdateTask(SdfPath const &id,
        tracker.MarkTaskDirty(id, HdChangeTracker::DirtyParams);
    } else if (key == HdTokens->collection) {
        tracker.MarkTaskDirty(id, HdChangeTracker::DirtyCollection);
+   } else if (key == HdTokens->renderTags) {
+       tracker.MarkTaskDirty(id, HdChangeTracker::DirtyRenderTags);
    } else {
        TF_CODING_ERROR("Unknown key %s", key.GetText());
    }
@@ -707,6 +743,19 @@ HdUnitTestDelegate::GetRenderTag(SdfPath const& id)
 }
 
 /*virtual*/
+TfTokenVector
+HdUnitTestDelegate::GetTaskRenderTags(SdfPath const& id)
+{
+    const auto it = _tasks.find(id);
+    if (it == _tasks.end()) {
+        return TfTokenVector();
+    }
+
+    const VtDictionary &dict = it->second.params;
+    return VtDictionaryGet<TfTokenVector>(dict, HdTokens->renderTags, VtDefault = TfTokenVector());
+}
+
+/*virtual*/
 HdMeshTopology 
 HdUnitTestDelegate::GetMeshTopology(SdfPath const& id)
 {
@@ -732,9 +781,9 @@ HdUnitTestDelegate::GetBasisCurvesTopology(SdfPath const& id)
     // Need to implement testing support for basis curves
     return HdBasisCurvesTopology(curve.type,
                                  curve.basis,
-                                 HdTokens->nonperiodic,
+                                 curve.wrap,
                                  curve.curveVertexCounts,
-                                 VtIntArray());
+                                 curve.curveIndices);
 }
 
 /*virtual*/
@@ -794,6 +843,16 @@ HdUnitTestDelegate::GetDisplayStyle(SdfPath const& id)
 }
 
 /*virtual*/
+HdCullStyle 
+HdUnitTestDelegate::GetCullStyle(SdfPath const& id)
+{
+    if (_meshes.find(id) != _meshes.end()) {
+        return _meshes[id].cullStyle;
+    }
+    return HdCullStyleDontCare;
+}
+
+/*virtual*/
 VtIntArray
 HdUnitTestDelegate::GetInstanceIndices(SdfPath const& instancerId,
                                         SdfPath const& prototypeId)
@@ -819,6 +878,18 @@ HdUnitTestDelegate::GetInstanceIndices(SdfPath const& instancerId,
         }
     }
     return indices;
+}
+
+/*virtual*/
+SdfPathVector
+HdUnitTestDelegate::GetInstancerPrototypes(SdfPath const& instancerId)
+{
+    HD_TRACE_FUNCTION();
+
+    if (_Instancer *instancer = TfMapLookupPtr(_instancers, instancerId)) {
+        return instancer->prototypes;
+    }
+    return SdfPathVector();
 }
 
 /*virtual*/
@@ -876,7 +947,8 @@ HdRenderBufferDescriptor
 HdUnitTestDelegate::GetRenderBufferDescriptor(SdfPath const& id)
 {
     if (_RenderBuffer *rb = TfMapLookupPtr(_renderBuffers, id)) {
-        return { rb->dims, rb->format, rb->multiSampled };
+        return HdRenderBufferDescriptor(
+                rb->dims, rb->format, rb->multiSampled);
     }
     return HdRenderBufferDescriptor();
 }
@@ -890,6 +962,10 @@ HdUnitTestDelegate::GetTransform(SdfPath const& id)
     if(_meshes.find(id) != _meshes.end()) {
         return GfMatrix4d(_meshes[id].transform);
     }
+    if (_cameras.find(id) != _cameras.end()) {
+        return GfMatrix4d(_cameras[id].transform);
+    }
+
     return GfMatrix4d(1);
 }
 
@@ -1589,6 +1665,7 @@ HdUnitTestDelegate::AddCurves(
         _BuildArray(points, sizeof(points)/sizeof(points[0])),
         _BuildArray(curveVertexCounts,
                     sizeof(curveVertexCounts)/sizeof(curveVertexCounts[0])),
+        /*curveIndices=*/VtIntArray(),
         authNormals,
         type,
         basis,
@@ -1596,6 +1673,21 @@ HdUnitTestDelegate::AddCurves(
         VtValue(1.0f), HdInterpolationConstant,
         width, widthInterp,
         instancerId);
+}
+
+void
+HdUnitTestDelegate::SetCurveWrapMode(
+    SdfPath const &id, TfToken const &wrap)
+{
+    if (_curves.find(id) != _curves.end()) {
+        if (_curves[id].wrap != wrap) {
+            _curves[id].wrap = wrap;
+            HdChangeTracker& tracker = GetRenderIndex().GetChangeTracker();
+            tracker.MarkRprimDirty(id, HdChangeTracker::DirtyTopology);
+        }
+    } else {
+        TF_WARN("Could not find Rprim named %s.\n", id.GetText());
+    }
 }
 
 void
@@ -1948,6 +2040,7 @@ HdUnitTestDelegate::PopulateInvalidPrimsSet()
     // empty curve
     AddBasisCurves(SdfPath("/empty_curve"),
                             VtVec3fArray(),
+                            VtIntArray(),
                             VtIntArray(),
                             VtVec3fArray(),
                             HdTokens->linear,

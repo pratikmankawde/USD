@@ -46,7 +46,9 @@ public:
         const std::string &identifier,
         const HgiShaderSectionAttributeVector &attributes = {},
         const std::string &storageQualifier = std::string(),
-        const std::string &defaultValue = std::string());
+        const std::string &defaultValue = std::string(),
+        const std::string &arraySize = std::string(),
+        const std::string &blockInstanceIdentifier = std::string());
 
     HGIVULKAN_API
     ~HgiVulkanShaderSection() override;
@@ -69,12 +71,16 @@ public:
 
 protected:
     const std::string _storageQualifier;
+    const std::string _arraySize;
 
 private:
     HgiVulkanShaderSection() = delete;
     HgiVulkanShaderSection & operator=(const HgiVulkanShaderSection&) = delete;
     HgiVulkanShaderSection(const HgiVulkanShaderSection&) = delete;
 };
+
+using HgiVulkanShaderSectionPtrVector = 
+    std::vector<HgiVulkanShaderSection*>;
 
 /// \class HgiVulkanMacroShaderSection
 ///
@@ -116,9 +122,14 @@ public:
     explicit HgiVulkanMemberShaderSection(
         const std::string &identifier,
         const std::string &typeName,
+        const HgiInterpolationType interpolation,
+        const HgiSamplingType sampling,
+        const HgiStorageType storage,
         const HgiShaderSectionAttributeVector &attributes,
         const std::string &storageQualifier,
-        const std::string &defaultValue = std::string());
+        const std::string &defaultValue = std::string(),
+        const std::string &arraySize = std::string(),
+        const std::string &blockInstanceIdentifier = std::string());
 
     HGIVULKAN_API
     ~HgiVulkanMemberShaderSection() override;
@@ -136,6 +147,9 @@ private:
     HgiVulkanMemberShaderSection(const HgiVulkanMemberShaderSection&) = delete;
 
     std::string _typeName;
+    HgiInterpolationType _interpolation;
+    HgiSamplingType _sampling;
+    HgiStorageType _storage;
 };
 
 /// \class HgiVulkanBlockShaderSection
@@ -172,6 +186,10 @@ public:
         const std::string &identifier,
         const uint32_t layoutIndex,
         const uint32_t dimensions,
+        const HgiFormat format,
+        const HgiShaderTextureType textureType,
+        const uint32_t arraySize,
+        const bool writable,
         const HgiShaderSectionAttributeVector &attributes,
         const std::string &defaultValue = std::string());
 
@@ -192,7 +210,15 @@ private:
         const HgiVulkanTextureShaderSection&) = delete;
     HgiVulkanTextureShaderSection(const HgiVulkanTextureShaderSection&) = delete;
 
+    void _WriteSamplerType(std::ostream &ss) const;
+    void _WriteSampledDataType(std::ostream &ss) const;
+
     const uint32_t _dimensions;
+    const HgiFormat _format;
+    const HgiShaderTextureType _textureType;
+    const uint32_t _arraySize;
+    const bool _writable;
+    static const std::string _storageQualifier;
 };
 
 /// \class HgiVulkanBufferShaderSection
@@ -207,6 +233,9 @@ public:
         const std::string &identifier,
         const uint32_t layoutIndex,
         const std::string &type,
+        const HgiBindingType binding,
+        const std::string arraySize,
+        const bool writable,
         const HgiShaderSectionAttributeVector &attributes);
 
     HGIVULKAN_API
@@ -225,6 +254,9 @@ private:
     HgiVulkanBufferShaderSection(const HgiVulkanBufferShaderSection&) = delete;
 
     const std::string _type;
+    const HgiBindingType _binding;
+    const std::string _arraySize;
+    const bool _writable;
 };
 
 /// \class HgiVulkanKeywordShaderSection
@@ -257,6 +289,36 @@ private:
 
     const std::string _type;
     const std::string _keyword;
+};
+
+/// \class HgiVulkanInterstageBlockShaderSection
+///
+/// Defines and writes out an interstage interface block
+///
+class HgiVulkanInterstageBlockShaderSection final: public HgiVulkanShaderSection
+{
+public:
+    HGIVULKAN_API
+    explicit HgiVulkanInterstageBlockShaderSection(
+        const std::string &blockIdentifier,
+        const std::string &blockInstanceIdentifier,
+        const HgiShaderSectionAttributeVector &attributes,
+        const std::string &qualifier,
+        const std::string &arraySize,
+        const HgiVulkanShaderSectionPtrVector &members);
+
+    HGIVULKAN_API
+    bool VisitGlobalMemberDeclarations(std::ostream &ss) override;
+
+private:
+    HgiVulkanInterstageBlockShaderSection() = delete;
+    HgiVulkanInterstageBlockShaderSection & operator=(
+        const HgiVulkanInterstageBlockShaderSection&) = delete;
+    HgiVulkanInterstageBlockShaderSection(
+        const HgiVulkanInterstageBlockShaderSection&) = delete;
+
+    const std::string _qualifier;
+    const HgiVulkanShaderSectionPtrVector _members;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

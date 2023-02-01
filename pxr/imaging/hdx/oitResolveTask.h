@@ -36,11 +36,25 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 class HdSceneDelegate;
 
+using HdRenderPassStateSharedPtr = std::shared_ptr<class HdRenderPassState>;
 using HdStRenderPassStateSharedPtr = std::shared_ptr<class HdStRenderPassState>;
 
-using HdRenderPassSharedPtr = std::shared_ptr<class HdRenderPass>;
+using HdSt_ImageShaderRenderPassSharedPtr =
+    std::shared_ptr<class HdSt_ImageShaderRenderPass>;
 using HdStRenderPassShaderSharedPtr =
     std::shared_ptr<class HdStRenderPassShader>;
+
+/// OIT resolve task params.
+struct HdxOitResolveTaskParams
+{
+    HdxOitResolveTaskParams()
+        : useAovMultiSample(true)
+        , resolveAovMultiSample(true)
+    {}
+
+    bool useAovMultiSample;
+    bool resolveAovMultiSample;
+};
 
 /// \class HdxOitResolveTask
 ///
@@ -93,13 +107,19 @@ private:
         GfVec2i const& screenSize);
 
     GfVec2i _ComputeScreenSize(
-        HdTaskContext *ctx,
+        HdTaskContext* ctx,
         HdRenderIndex* renderIndex) const;
 
-    const HdRenderPassAovBindingVector &_GetAovBindings(
-        HdTaskContext *ctx) const;
+    const HdRenderPassAovBindingVector& _GetAovBindings(
+        HdTaskContext* ctx) const;
 
-    HdRenderPassSharedPtr _renderPass;
+    void _UpdateCameraFraming(
+        HdTaskContext* ctx);
+
+    HdRenderPassStateSharedPtr _GetContextRenderPassState(
+        HdTaskContext* ctx) const;
+
+    HdSt_ImageShaderRenderPassSharedPtr _renderPass;
     HdStRenderPassStateSharedPtr _renderPassState;
     HdStRenderPassShaderSharedPtr _renderPassShader;
 
@@ -110,6 +130,15 @@ private:
     HdBufferArrayRangeSharedPtr _indexBar;
     HdBufferArrayRangeSharedPtr _uniformBar;
 };
+
+HDX_API
+bool operator==(const HdxOitResolveTaskParams& lhs,
+                const HdxOitResolveTaskParams& rhs);
+HDX_API
+bool operator!=(const HdxOitResolveTaskParams& lhs,
+                const HdxOitResolveTaskParams& rhs);
+HDX_API
+std::ostream& operator<<(std::ostream& out, const HdxOitResolveTaskParams& pv);
 
 PXR_NAMESPACE_CLOSE_SCOPE
 

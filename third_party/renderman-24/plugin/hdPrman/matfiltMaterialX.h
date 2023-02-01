@@ -25,22 +25,23 @@
 #define EXT_RMANPKG_24_0_PLUGIN_RENDERMAN_PLUGIN_HD_PRMAN_MATFILT_MATERIALX_H
 
 #include "pxr/pxr.h"
-#include "hdPrman/matfiltFilterChain.h"
+#include "pxr/imaging/hd/material.h"
+#include "pxr/imaging/hd/materialNetworkInterface.h"
+#include "pxr/usd/ndr/declare.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-/// MatfiltFilterChain::FilterFnc implementation which supports
-/// MaterialX shading node graphs.
+class HdMaterialNetworkInterface;
+
+/// Processes MaterialX shading node graphs for RenderMan.
 /// 
 /// The terminal nodes are converted to PxrSurface, PxrDisplacement,
-/// and PxrVolume respectively, and any input graphs use MaterialX
-/// shader code-generation, are compiled, and replaced with a single
-/// node.
-void MatfiltMaterialX(const SdfPath & networkId,
-                      HdMaterialNetwork2 & network,
-                      const std::map<TfToken, VtValue> & contextValues,
-                      const NdrTokenVec & shaderTypePriority,
-                      std::vector<std::string> * outputErrorMessages);
+/// and PxrVolume respectively, and any input graphs that use MaterialX
+/// shader code-generation are compiled and replaced with a single node.
+void
+MatfiltMaterialX(
+    HdMaterialNetworkInterface *netInterface,
+    std::vector<std::string> *outputErrorMessages);
 
 PXR_NAMESPACE_CLOSE_SCOPE
 

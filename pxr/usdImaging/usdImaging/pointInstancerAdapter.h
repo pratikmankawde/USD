@@ -59,6 +59,30 @@ public:
     virtual bool IsInstancerAdapter() const override;
 
     // ---------------------------------------------------------------------- //
+    /// \name Scene Index Support
+    // ---------------------------------------------------------------------- //
+
+    USDIMAGING_API
+    TfTokenVector GetImagingSubprims(UsdPrim const& prim) override;
+
+    USDIMAGING_API
+    TfToken GetImagingSubprimType(
+            UsdPrim const& prim,
+            TfToken const& subprim) override;
+
+    USDIMAGING_API
+    HdContainerDataSourceHandle GetImagingSubprimData(
+            UsdPrim const& prim,
+            TfToken const& subprim,
+            const UsdImagingDataSourceStageGlobals &stageGlobals) override;
+
+    USDIMAGING_API
+    HdDataSourceLocatorSet InvalidateImagingSubprim(
+        UsdPrim const& prim,
+        TfToken const& subprim,
+        TfTokenVector const& properties) override;
+
+    // ---------------------------------------------------------------------- //
     /// \name Parallel Setup and Resolve
     // ---------------------------------------------------------------------- //
     
@@ -259,6 +283,11 @@ public:
         SdfPath const& cachePath,
         int instanceIndex,
         HdInstancerContext *instancerContext) const override;
+
+    virtual SdfPathVector GetScenePrimPaths(
+        SdfPath const& cachePath,
+        std::vector<int> const& instanceIndices,
+        std::vector<HdInstancerContext> *instancerCtxs) const override;
 
     virtual bool PopulateSelection(
         HdSelection::HighlightMode const& highlightMode,

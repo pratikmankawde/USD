@@ -140,10 +140,22 @@ HdPrmanInstancer::SampleInstanceTransforms(
     HdTimeSampleArray<VtVec3fArray, HDPRMAN_MAX_TIME_SAMPLES> translates;
     HdTimeSampleArray<VtQuathArray, HDPRMAN_MAX_TIME_SAMPLES> rotates;
     HdTimeSampleArray<VtVec3fArray, HDPRMAN_MAX_TIME_SAMPLES> scales;
-    instanceXforms.UnboxFrom(boxedInstanceXforms);
-    translates.UnboxFrom(boxedTranslates);
-    rotates.UnboxFrom(boxedRotates);
-    scales.UnboxFrom(boxedScales);
+    if (!instanceXforms.UnboxFrom(boxedInstanceXforms)) {
+        TF_WARN("<%s> instanceTransform did not have expected type matrix4d[]",
+                instancerId.GetText());
+    }
+    if (!translates.UnboxFrom(boxedTranslates)) {
+        TF_WARN("<%s> translate did not have expected type vec3f[]",
+                instancerId.GetText());
+    }
+    if (!rotates.UnboxFrom(boxedRotates)) {
+        TF_WARN("<%s> rotate did not have expected type quath[]",
+                instancerId.GetText());
+    }
+    if (!scales.UnboxFrom(boxedScales)) {
+        TF_WARN("<%s> scale did not have expected type vec3f[]",
+                instancerId.GetText());
+    }
 
     // As a simple resampling strategy, find the input with the max #
     // of samples and use its sample placement.  In practice we expect
@@ -197,7 +209,7 @@ HdPrmanInstancer::SampleInstanceTransforms(
             }
             if (rot.size() > instanceIndex) {
                 GfMatrix4d r(1);
-                r.SetRotate(GfRotation(rot[instanceIndex]));
+                r.SetRotate(GfQuatd(rot[instanceIndex]));
                 ma[j] = r * ma[j];
             }
             if (scale.size() > instanceIndex) {
@@ -284,19 +296,35 @@ HdPrmanInstancer::GetInstancePrimvars(
             continue;
         }
 
-        // Instance primvars with the "ri:attributes:" prefix correspond to
-        // renderman-namespace attributes and have that prefix stripped.
+        // Instance primvars with the "ri:attributes:" and
+        // "primvars:ri:attributes:" prefixes correspond to renderman-namespace
+        // attributes and have that prefix stripped.
         // All other primvars are in the "user:" namespace, so if they don't
         // have that prefix we need to add it.
         RtUString name;
         static const char *userPrefix = "user:";
         static const char *riAttrPrefix = "ri:attributes:";
+        static const char *primVarsRiAttrPrefix = "primvars:ri:attributes:";
         if (!strncmp(entry.first.GetText(), userPrefix, strlen(userPrefix))) {
             name = RtUString(entry.first.GetText());
         } else if (!strncmp(entry.first.GetText(), riAttrPrefix,
                             strlen(riAttrPrefix))) {
             const char *strippedName = entry.first.GetText();
             strippedName += strlen(riAttrPrefix);
+            name = RtUString(strippedName);
+
+            // ri:attributes and primvars:ri:attributes primvars end up having
+            // the same name, potentially causing collisions in the primvar list.
+            // When both ri:attributes and primvar:ri:attributes versions of 
+            // the same primvars exist, the primvar:ri:attributes version should
+            // win out.
+            if (attrs.HasParam(name)) {
+                continue;
+            }
+        } else if (!strncmp(entry.first.GetText(), primVarsRiAttrPrefix,
+                            strlen(primVarsRiAttrPrefix))) {
+            const char *strippedName = entry.first.GetText();
+            strippedName += strlen(primVarsRiAttrPrefix);
             name = RtUString(strippedName);
         } else {
             std::string mangled =
@@ -323,8 +351,11 @@ HdPrmanInstancer::GetInstancePrimvars(
                 attrs.SetPoint(name, RtPoint3(v[0], v[1], v[2]));
             } else if (primvar.role == HdPrimvarRoleTokens->normal) {
                 attrs.SetPoint(name, RtNormal3(v[0], v[1], v[2]));
-            } else {
+            } else if (primvar.role == HdPrimvarRoleTokens->vector) {
                 attrs.SetVector(name, RtVector3(v[0], v[1], v[2]));
+            } else {
+                attrs.SetFloatArray(
+                    name, reinterpret_cast<const float*>(v.data()), 3);
             }
         } else if (val.IsHolding<VtArray<GfVec4f>>()) {
             const VtArray<GfVec4f>& v = val.UncheckedGet<VtArray<GfVec4f>>();
